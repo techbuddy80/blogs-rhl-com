@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/techbuddy80/blogs-rhl-com/discussions
+    about: For questions or general discussion, use Discussions instead of an issue.

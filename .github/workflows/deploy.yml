@@ -1,0 +1,24 @@
+name: Deploy
+
+# Runs only after CI has passed on main — never deploys unvalidated code.
+# Requires a self-hosted runner registered on the homelab host (see
+# docs/12-deployment.md), since the tunnel-only network has no inbound
+# path for a cloud-hosted runner to reach it directly.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to homelab
+    runs-on: self-hosted
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Run deploy script
+        run: /opt/blogs-rhl-com/scripts/deploy.sh
