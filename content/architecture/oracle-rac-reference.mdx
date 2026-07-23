@@ -1,0 +1,24 @@
+---
+title: "Oracle RAC — Reference Architecture"
+description: "Reference diagram and rationale for a two-node Oracle RAC deployment."
+publishedAt: "2026-07-22"
+category: "oracle"
+tags: ["rac"]
+domain: "oracle"
+diagramType: "mermaid"
+relatedProjects: ["oracle-rac-lab"]
+relatedKbArticles: ["oracle/rac/cache-fusion", "oracle/rac/interconnect-requirements"]
+---
+
+## Overview
+
+```mermaid
+graph LR
+  A[Instance 1] <--> C[Interconnect]
+  B[Instance 2] <--> C
+  A --> D[(Shared Storage)]
+  B --> D
+```
+
+A two-node RAC deployment with a dedicated private interconnect for Cache
+Fusion traffic and shared storage visible to both instances.

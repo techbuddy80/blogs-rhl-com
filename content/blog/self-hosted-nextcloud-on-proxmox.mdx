@@ -1,0 +1,387 @@
+---
+title: "Building My Own Google Drive: A Production-Grade Personal Cloud on Proxmox"
+description: "A from-scratch walkthrough of replacing Google Drive and Dropbox with a self-hosted Nextcloud stack — Docker Compose, ZFS, Cloudflare Tunnel, and every real bug I hit along the way."
+publishedAt: "2026-07-20"
+category: "homelab"
+tags: ["proxmox", "zfs", "nextcloud", "docker", "cloudflare-tunnel", "postgresql", "redis", "self-hosting"]
+author: "You"
+---
+
+## Why I Built This
+
+I run a homelab on a single Dell OptiPlex 7060 Micro (Intel i7-8700T, 64GB
+RAM) running Proxmox VE, hosting a mix of production services and a small
+Oracle DBA learning lab. It already handles Plex, a domain controller, an
+Ansible control node, and a Docker host for a handful of self-hosted apps —
+all reachable from anywhere via Cloudflare Tunnel, with zero exposed ports
+on my router.
+
+The one thing missing: my own Google Drive / Dropbox replacement. Cross-device
+file sync, automatic camera upload from my phone, and secure sharing links —
+but self-hosted, open source, and built to last for years, not a weekend
+project I'd abandon.
+
+This post covers the whole build: the architecture decision, the storage
+design, the Proxmox VM setup, the Docker Compose stack, wiring it up to
+Cloudflare Tunnel — and, honestly, the most useful part for anyone attempting
+the same thing: **every real bug I hit and how I actually fixed it.**
+
+---
+
+## Picking the Platform: Nextcloud vs Seafile vs OpenCloud
+
+I compared three open-source options before committing:
+
+| | **Nextcloud** | **Seafile** | **OpenCloud** |
+|---|---|---|---|
+| Maturity | Mature, huge community, enterprise-backed | Mature, smaller community | Very new (2024 fork of ownCloud Infinite Scale) |
+| Mobile apps | Full-featured, camera auto-upload built in | Full-featured | Less mature |
+| Extensibility | Huge app ecosystem (calendar, contacts, Office, Talk) | Sync-and-share focused, narrow scope | Minimal today |
+| Long-term risk | Low — well-funded, widely adopted | Low-moderate | Higher — unproven upgrade paths |
+
+**I went with Nextcloud.** Seafile's sync engine is arguably technically
+superior for pure file sync, but I wanted more than that — sharing, and
+room to grow into calendar/contacts later. OpenCloud is architecturally
+interesting but too young to trust with irreplaceable personal data today.
+
+I chose to hand-roll the stack (official `nextcloud:fpm` image + Postgres +
+Redis + Caddy) rather than use Nextcloud AIO (the official all-in-one
+bundle), specifically because I wanted full control over every tuning
+knob — Postgres config, PHP-FPM pool sizing, Caddy's security headers — not
+an abstracted, self-managed bundle.
+
+---
+
+## Storage Design: ZFS on a Dedicated Drive
+
+I dedicated a separate SSD entirely to this project — not sharing my
+existing Proxmox VM storage pools. Here's why, and how.
+
+### Why ZFS instead of plain ext4
+
+- **Checksumming** — catches silent bit-rot, which ext4 simply can't detect.
+- **Native snapshots** — near-zero-cost point-in-time recovery, essential
+  for personal files.
+- **`zfs send/receive`** — efficient incremental backups, far better than
+  a monthly full `rsync` re-scan.
+
+Even on a single disk with no redundancy, checksumming alone is worth it —
+you find out *when* corruption happens instead of discovering it years
+later during a restore.
+
+### Setting up the pool
+
+```bash
+# On the Proxmox host, after physically attaching the drive
+zpool create -o ashift=12 nextcloud01 /dev/disk/by-id/<your-drive-id>
+
+zfs set atime=off nextcloud01
+zpool set autotrim=on nextcloud01
+zfs set compression=lz4 nextcloud01
+```
+
+`ashift=12` matches the 4K sector size of virtually all modern SSDs — get
+this wrong and you can't fix it without rebuilding the pool from scratch, so
+it's worth double-checking before writing any data.
+
+### Dataset layout
+
+```bash
+zfs create nextcloud01/data      # actual user files — large recordsize
+zfs create nextcloud01/appdata   # Postgres/Redis state — small recordsize
+zfs create nextcloud01/backup    # local backup staging
+
+zfs set recordsize=1M nextcloud01/data
+zfs set recordsize=16K nextcloud01/appdata
+
+# Soft quotas — early warning before the pool actually fills
+zfs set quota=750G nextcloud01/data
+zfs set quota=50G nextcloud01/appdata
+zfs set quota=100G nextcloud01/backup
+```
+
+Splitting `data` from `appdata` matters: large, mostly-static files want a
+big `recordsize` for throughput; a database's small random writes want a
+small one to avoid read-modify-write amplification.
+
+### Presenting the storage to the VM
+
+Rather than passing the physical drive through to the VM directly, I
+registered the ZFS pool as a Proxmox storage target and carved out virtual
+disks (zvols) from it — this keeps Proxmox in control of the storage and
+avoids the reliability pitfalls of raw device passthrough:
+
+```bash
+pvesm add zfspool nextcloud01-storage --pool nextcloud01 --content images
+
+qm set <VMID> --scsi1 nextcloud01:750,discard=on,ssd=1,iothread=1
+qm set <VMID> --scsi2 nextcloud01:50,discard=on,ssd=1,iothread=1
+```
+
+Inside the guest, I partitioned, formatted as ext4 (deliberately — ZFS
+already did its job one layer down at the host), and mounted by UUID:
+
+```bash
+sudo parted /dev/sdb --script mklabel gpt mkpart primary ext4 0% 100%
+sudo mkfs.ext4 /dev/sdb1
+sudo mkdir -p /mnt/ncdata
+
+sudo blkid /dev/sdb1   # grab the UUID
+
+echo 'UUID=<uuid>  /mnt/ncdata  ext4  defaults,discard,nofail  0  2' | sudo tee -a /etc/fstab
+sudo mount -a
+```
+
+`nofail` matters — if this disk is ever temporarily unavailable, the VM
+still boots to a login prompt instead of dropping to an emergency shell.
+
+---
+
+## The Proxmox VM
+
+- **4 vCPU, 8GB RAM** (with a 4GB ballooning floor)
+- **q35 machine type, OVMF/UEFI BIOS**
+- **VirtIO SCSI single controller**, with `iothread=1` on every disk
+- **50GB boot disk** on my existing NVMe-backed thin pool (OS, app code, DB)
+- **The two ZFS-backed disks above** for user data and app state
+
+I run Ubuntu Server 24.04 as the guest OS, matching the rest of my homelab.
+
+---
+
+## The Docker Compose Stack
+
+Six services: `db` (PostgreSQL), `redis`, `app` (Nextcloud, PHP-FPM),
+`cron`, `caddy` (reverse proxy), and `cloudflared` (tunnel connector).
+
+Key design choices:
+
+- **Postgres**, tuned conservatively for a shared 8GB VM:
+  ```
+  shared_buffers = 640MB
+  effective_cache_size = 1536MB
+  maintenance_work_mem = 128MB
+  ```
+- **Redis** as both the distributed cache and the file-locking backend —
+  essential for reliable behavior across simultaneous desktop sync + mobile
+  app + web UI access to the same account.
+- **Caddy**, fronting PHP-FPM via `php_fastcgi`, with a full security-header
+  set (HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`)
+  and a `tls internal` self-signed cert for the internal hop to Cloudflare
+  Tunnel.
+- **Every container hardened** with `cap_drop: ALL`, `no-new-privileges`,
+  and only the specific capabilities each one actually needs added back.
+- **Secrets** via Docker Compose's native `secrets:` file mechanism, not
+  plaintext environment variables in the compose file.
+
+I won't paste the entire compose file here (it's long), but the repo
+structure looked like:
+
+```
+/opt/nextcloud/
+├── docker-compose.yml
+├── .env
+├── secrets/          (generated locally, never committed)
+├── caddy/Caddyfile
+├── postgres/postgresql.conf
+├── redis/redis.conf
+├── php/{uploads.ini,opcache.ini,www.conf}
+└── nextcloud-config/{apcu.config.php,nc-tuning.config.php}
+```
+
+**Want the actual files?** I've put together a sanitized version of the
+full bundle — every domain, path, and credential replaced with placeholders
+— which you can grab here:
+**[github.com/techbuddy80/nextcloud-infra-public](https://github.com/techbuddy80/nextcloud-infra-public)**.
+It includes the full `docker-compose.yml`, every config file referenced
+above, and a README that repeats the key gotchas from the "Real Bugs"
+section below so it's usable on its own without re-reading the whole post.
+
+---
+
+## Cloudflare Tunnel
+
+No port forwarding anywhere — my homelab sits behind a double-NAT setup
+(ISP router → a second internal router), so exposing anything via
+traditional port forwarding would already be painful even before considering
+security. Cloudflare Tunnel solves this entirely with outbound-only
+connections:
+
+1. Created a **dedicated tunnel** for this stack (separate from tunnels
+   used by my other self-hosted services), named `nextcloud`.
+2. Added a **Public Hostname**: `cloud.<mydomain>.com` → `HTTPS` →
+   `caddy:443` (the Docker service name, since both containers share a
+   network).
+3. Ran `cloudflared` as a container in the same Compose stack, pointed at
+   the tunnel via a token.
+
+---
+
+## The Real Bugs I Hit (and How I Fixed Them)
+
+This is the section I wish existed when I started. Every one of these cost
+real time to diagnose.
+
+### 1. Postgres restart-looping with `chown: Operation not permitted`
+
+I'd hardened every container with `cap_drop: ALL` — reasonable in
+principle, but Postgres's own entrypoint needs to `chown`/`chmod` its data
+directory as root before dropping privileges to its internal user. Without
+`CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE` added back explicitly, it can
+never start.
+
+**Fix:** add those four capabilities back specifically for the `db`
+service.
+
+### 2. Nextcloud's file copy failing with rsync "Operation not permitted"
+
+The `nextcloud:*-fpm-alpine` image's `www-data` user is **UID/GID 82** —
+not 33, which is what I (and a lot of documentation online) assumed from
+Debian-based image conventions. Every bind mount and named volume needs to
+be owned by 82, not 33, or the entrypoint's own file copy step fails
+partway through, over and over, on every restart.
+
+**Fix:**
+```bash
+docker compose exec app cat /etc/passwd | grep www-data
+# confirm the real UID before assuming anything
+sudo chown -R 82:82 /mnt/ncdata
+docker run --rm -v <volume-name>:/data alpine chown -R 82:82 /data
+```
+
+Also needed the `FOWNER` capability added, on top of the four above, for
+rename/unlink operations on files the image itself created as a different
+UID during its own build.
+
+### 3. Empty `config.php`, installer silently failing
+
+The automatic first-run installer got stuck (still not entirely sure why —
+possibly a timing race with the database becoming ready). I worked around
+it by running the install manually:
+
+```bash
+docker compose exec -u 82 app php occ maintenance:install \
+  --database=pgsql --database-host=db --database-name=nextcloud \
+  --database-user=nextcloud --database-pass="$(cat secrets/db_password.txt)" \
+  --admin-user=admin --admin-pass="$(cat secrets/nc_admin_password.txt)" \
+  --data-dir=/var/www/html/data
+```
+
+This worked — but it skips a step the automatic entrypoint normally
+handles: writing Redis session configuration into `config.php`. Which led
+directly to the next bug.
+
+### 4. Login "succeeding" but session never persisting
+
+Symptoms: submit the login form, get bounced right back to the login page,
+no error message. The actual log line told the real story:
+
+```
+session_start(): Redis connection not available
+```
+
+Nextcloud's Redis-backed session handler simply wasn't configured, because
+the manual install (bug #3) skipped it. Fixed by setting it explicitly:
+
+```bash
+docker compose exec -u 82 app php occ config:system:set redis host --value=redis
+docker compose exec -u 82 app php occ config:system:set redis port --value=6379 --type=integer
+docker compose exec -u 82 app php occ config:system:set redis password --value="$(cat secrets/redis_password.txt)"
+docker compose exec -u 82 app php occ config:system:set memcache.distributed --value='\OC\Memcache\Redis'
+docker compose exec -u 82 app php occ config:system:set memcache.locking --value='\OC\Memcache\Redis'
+```
+
+### 5. The Redis password itself was the deeper problem
+
+Even after the fix above, sessions still failed intermittently. The
+auto-generated Redis password (base64, via `openssl rand -base64 32`)
+contained `+`, `/`, and `=` characters — all completely normal for base64,
+but all meaningful in a URL-style connection string
+(`tcp://redis:6379?auth=...`). Depending on the code path, that could
+silently corrupt the actual password being sent.
+
+**Fix:** regenerate the Redis password with `openssl rand -hex 32` instead
+— alphanumeric only, no characters that can ever be misinterpreted in a
+connection string. I'd recommend this specifically for any password that
+ends up embedded in a URL anywhere in your stack, even if the docs don't
+call it out.
+
+### 6. `preview:pre-generate` command not found
+
+The Preview Generator isn't bundled by default — it's a separate optional
+app:
+
+```bash
+docker compose exec -u 82 app php occ app:install previewgenerator
+```
+
+### 7. `cloudflared` container crash-looping: `"sh": executable file not found`
+
+The `cloudflare/cloudflared` image is distroless — no shell, no coreutils,
+just the static binary. My original entrypoint used `sh -c '... $(cat
+secret-file) ...'` to read the tunnel token from a Docker secret — a
+pattern that works fine for images with a shell, but fails outright here.
+
+**Fix:** use a plain environment variable instead, since there's no shell
+available to do file-based secret substitution:
+
+```yaml
+environment:
+  TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+command: ["tunnel", "--no-autoupdate", "run"]
+```
+
+### 8. Cloudflare 502 — `tls: internal error`
+
+Caddy's certificate (`tls internal`, self-signed) is bound to a specific
+hostname (`cloud.<mydomain>.com`), but Cloudflare Tunnel's default SNI
+during the TLS handshake was just `caddy` (from the origin URL). Caddy saw
+an SNI it didn't recognize and rejected the handshake.
+
+**Fix:** in the Cloudflare Zero Trust dashboard, under the Public
+Hostname's TLS settings, set **"Origin Server Name"** explicitly to
+`cloud.<mydomain>.com`.
+
+### 9. Cloudflare 502 — `x509: certificate signed by unknown authority`
+
+After fixing #8, a *different* error appeared — Cloudflare now correctly
+sent the right SNI, but was trying to validate Caddy's self-signed cert
+against a public CA (which will always fail for a self-signed cert).
+
+**Fix:** enable **"No TLS Verify"** in the same TLS settings section. Worth
+noting: I found this setting had silently reset to Off after I saved an
+unrelated change on the same page — worth re-checking it any time you touch
+that config, not just the first time you set it.
+
+---
+
+## Where It Stands Now
+
+All six containers healthy, `cloud.<mydomain>.com` loading the actual
+Nextcloud dashboard, file upload confirmed working end-to-end through the
+whole chain (browser → Cloudflare → tunnel → Caddy → PHP-FPM → ZFS-backed
+disk).
+
+Still on my list before I'd call this fully "done":
+
+- Enabling 2FA on the admin account
+- Setting a DHCP reservation for the VM's IP (so the tunnel config never
+  silently breaks after a lease renewal)
+- Replacing the self-signed Caddy cert with a free **Cloudflare Origin CA
+  certificate**, so I'm not relying on "No TLS Verify" indefinitely
+- Running an actual backup **and a test restore** — a backup nobody has
+  ever restored from is a hope, not a plan
+- Ongoing monitoring via the Prometheus/Grafana stack I already run
+  elsewhere in the homelab
+
+---
+
+## Closing Thoughts
+
+If you're attempting something similar, my biggest piece of advice: **don't
+trust assumptions about UIDs, image behavior, or default settings — verify
+each one directly.** Almost every bug above came from an assumption that
+felt reasonable (Debian's `www-data` UID, a settings toggle staying set,
+a shell existing inside a container) turning out to be wrong for this
+specific combination of images and platform. Checking explicitly, every
+time, would have saved hours.
