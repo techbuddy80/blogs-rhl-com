@@ -50,7 +50,7 @@ const blog = defineCollection({
   include: "**/*.mdx",
   schema: (z) => ({
     ...base,
-    author: z.string().default("Author"),
+    author: z.string().default("RamShankar"),
     coverImage: z.string().optional(),
     relatedSlugs: z.array(z.string()).optional(),
   }),
