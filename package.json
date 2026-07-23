@@ -21,7 +21,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "flexsearch": "^0.8.212",
-    "framer-motion": "^11.15.0",
+    "framer-motion": "^12.42.2",
     "github-slugger": "^2.0.0",
     "katex": "^0.18.1",
     "lucide-react": "^0.469.0",
