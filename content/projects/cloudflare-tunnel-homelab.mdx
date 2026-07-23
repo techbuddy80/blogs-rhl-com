@@ -1,0 +1,20 @@
+---
+title: "Cloudflare Tunnel for the Homelab"
+description: "Exposing internal services securely without opening a single inbound port."
+publishedAt: "2026-05-02"
+category: "infrastructure-networking"
+tags: ["cloudflare-tunnel", "homelab"]
+status: "completed"
+stack: ["Cloudflare Tunnel", "Docker", "Linux"]
+demoUrl: "https://blogs.rhl.com"
+---
+
+## Overview
+
+Every homelab service is reachable from the public internet through a
+Cloudflare Tunnel, with zero inbound firewall rules on the router.
+
+## Lessons learned
+
+Named tunnels with a config file are far easier to maintain long-term than
+quick tunnels.

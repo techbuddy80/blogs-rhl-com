@@ -1,0 +1,34 @@
+# Systemd unit for blogs.rhl.com — install with:
+#   sudo cp deploy/blogs-rhl-com.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now blogs-rhl-com
+#
+# See docs/12-deployment.md for the full setup, including the dedicated
+# service user this file assumes already exists.
+
+[Unit]
+Description=blogs.rhl.com (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+# Dedicated, unprivileged user — not root, not your personal login user.
+# Create with: sudo useradd --system --home /opt/blogs-rhl-com --shell /usr/sbin/nologin blogsrhl
+User=blogsrhl
+Group=blogsrhl
+WorkingDirectory=/opt/blogs-rhl-com
+EnvironmentFile=/opt/blogs-rhl-com/.env
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+
+# Basic hardening — this service only needs to bind a local port and read
+# its own working directory, nothing else on the system.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/blogs-rhl-com/.next/cache
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

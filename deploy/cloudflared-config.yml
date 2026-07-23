@@ -1,0 +1,15 @@
+# Cloudflare Tunnel config — see docs/12-deployment.md for the full setup
+# (tunnel creation, DNS routing, and running cloudflared as a service).
+#
+# Install at /etc/cloudflared/config.yml on the tunnel host (can be the
+# same VM/LXC as the site, or a separate lightweight one — the tunnel only
+# needs network access to wherever the Next.js process is listening).
+
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  # Order matters — first match wins. The catch-all 404 rule must be last.
+  - hostname: blogs.rhl.com
+    service: http://localhost:3000
+  - service: http_status:404

@@ -1,0 +1,23 @@
+---
+title: "Kubernetes Storage — Reference Architecture"
+description: "How persistent volumes are provisioned across the homelab Kubernetes cluster."
+publishedAt: "2026-06-15"
+category: "containers-kubernetes"
+tags: ["kubernetes", "storage"]
+domain: "kubernetes"
+diagramType: "mermaid"
+relatedProjects: ["oracle-rac-lab"]
+relatedKbArticles: ["oracle/rac/cache-fusion"]
+---
+
+## Overview
+
+```mermaid
+graph TD
+  A[Pod] --> B[PVC]
+  B --> C[StorageClass]
+  C --> D[(NFS on TrueNAS)]
+```
+
+Persistent volumes are backed by an NFS export from TrueNAS, provisioned
+dynamically via a `StorageClass`.
