@@ -1,0 +1,155 @@
+---
+title: "Building an AI-Powered Oracle Database Assistant: A Journey Through Streamlit, LLMs, and MCP"
+description: "A natural language interface to Oracle DB built with Streamlit and LLMs — the real roadblocks I hit (Python/Streamlit version gaps, local LLM performance, Oracle's ROWNUM quirks) and whether MCP is actually necessary or overkill for this."
+publishedAt: "2026-07-21"
+category: "ai"
+tags: ["oracle", "streamlit", "llm", "mcp", "ollama", "groq", "sql"]
+author: "You"
+---
+## Introduction
+
+Ever wished you could just *talk* to your Oracle database instead of writing SQL queries by hand? That's exactly what I set out to build — a natural language interface to Oracle DB using Streamlit, powered by an LLM backend. This post walks through the build, the roadblocks I hit along the way, and an important architectural question that came up: **should this use MCP (Model Context Protocol), or is a simpler direct API approach good enough?**
+
+## The Goal
+
+Build a web app that lets you type something like:
+
+> "Get highest paid employee details with their department"
+
+...and have it automatically:
+1. Convert that into valid Oracle SQL
+2. Execute it against a real Oracle database
+3. Return the results in a clean, readable format
+
+The stack: **Streamlit** for the UI, **SQLcl** for database execution, and an **LLM** (I experimented with Ollama locally, then Claude API, then Groq) to handle the natural language → SQL translation.
+
+## Setting Up the Stack
+
+The initial architecture was straightforward:
+
+```
+User Input → Streamlit UI → LLM API → Generated SQL → SQLcl → Oracle DB → Results
+```
+
+I started with **Ollama** running locally so I wouldn't need any API keys or internet dependency. This seemed like the right call for a self-contained tool — until reality hit.
+
+## Roadblock #1: Python Version Compatibility
+
+Running on an Oracle Enterprise Linux server with **Python 3.6.8**, I immediately hit issues with modern Python syntax:
+
+- The walrus operator (`:=`) — added in Python 3.8 — caused syntax errors
+- `subprocess.run()`'s `capture_output` parameter — added in Python 3.7 — wasn't supported
+- F-strings needed to be swapped for `.format()` in a few edge cases
+
+**Lesson learned:** always check your target environment's Python version *before* writing code that assumes the latest syntax. Enterprise servers often run older, more stable versions for good reason.
+
+## Roadblock #2: Streamlit Version Gaps
+
+Similarly, `st.tabs()` and `st.chat_input()` — both relatively recent Streamlit additions — weren't available on the installed version. I had to fall back to:
+
+- A sidebar `selectbox()` for navigation instead of tabs
+- A plain `text_input()` + button instead of the chat-style input widget
+
+Small trade-offs, but the app remained fully functional.
+
+## Roadblock #3: The Local LLM Performance Wall
+
+This was the big one. Running **Llama 3.1 8B** via Ollama on a server with 7.5GB RAM (and already using swap) meant every query took 60+ seconds — sometimes timing out entirely. Even switching to a smaller model like Phi-3 Mini didn't fully solve it.
+
+**The fix:** switch to a cloud-hosted LLM. I tried:
+- **Claude API** — excellent SQL generation, but hit a billing/credits snag initially
+- **Groq** — free tier, blazing fast (1-2 second responses) thanks to their custom inference hardware
+
+The performance difference was night and day. Local models are great for privacy and offline use, but if your hardware isn't beefy enough, cloud APIs are dramatically more practical.
+
+## Roadblock #4: Oracle's Quirky ROWNUM Behavior
+
+Here's a subtle one that tripped up the LLM repeatedly. Ask any modern SQL engine for "the top 1 result" and you'd write:
+
+```sql
+SELECT * FROM employees ORDER BY salary DESC FETCH FIRST 1 ROWS ONLY;
+```
+
+This works in PostgreSQL and SQL Server, but **fails silently or errors out on Oracle 12c and earlier**. Oracle requires the older `ROWNUM` pseudo-column instead — and critically, `ROWNUM` is evaluated *before* `ORDER BY`. So this naive approach:
+
+```sql
+SELECT * FROM employees ORDER BY salary DESC WHERE ROWNUM = 1; -- WRONG
+```
+
+...returns a **random row**, not the highest-paid employee. The correct pattern requires wrapping the ordered query in a subquery:
+
+```sql
+SELECT * FROM (
+    SELECT * FROM employees ORDER BY salary DESC
+) WHERE ROWNUM = 1;
+```
+
+The fix wasn't just in the SQL — it was in **prompt engineering**. I had to explicitly teach the LLM this Oracle-specific rule, with concrete examples, before it consistently generated correct queries. This really drove home that LLMs need domain-specific guardrails, especially for platform quirks that don't generalize across SQL dialects.
+
+## The Big Architectural Question: Direct API vs. MCP
+
+Once the app was working, an important question came up: **should this actually be using MCP (Model Context Protocol)** instead of direct API calls + subprocess execution?
+
+### What I Built (Direct Method)
+
+```
+Streamlit → LLM API call → parse SQL from text response → subprocess.run("sql ...") → Oracle
+```
+
+This is simple, fast to build, and works with any LLM provider. But it has real limitations:
+- SQL has to be extracted from free-text LLM responses using regex (fragile)
+- No structured validation of what the LLM is asking to execute
+- No persistent session or transaction management
+- Security is entirely on you — there's no tool-level access control
+
+### What True MCP Would Look Like
+
+```
+Streamlit → MCP Client → MCP Server (with defined SQLcl tools) → Oracle
+```
+
+With MCP, the LLM doesn't generate raw text that you then parse — it calls **structured tools** with validated parameters:
+
+```json
+{
+  "name": "execute_sql",
+  "description": "Execute an Oracle SQL query",
+  "parameters": {
+    "query": { "type": "string" },
+    "max_rows": { "type": "integer", "default": 100 }
+  }
+}
+```
+
+This gives you:
+- **Schema validation** before anything touches the database
+- **Better error handling** through standardized MCP responses
+- **Composability** — easy to add more tools (schema inspection, transaction control, etc.)
+- **Tighter security boundaries** around what the LLM can and can't do
+
+### So Which One Should You Use?
+
+| Use Case | Recommended Approach |
+|---|---|
+| Quick prototype / personal tool | Direct API method |
+| Need multiple LLM providers | Direct API method |
+| Production system | MCP |
+| Security-sensitive environment | MCP |
+| Complex multi-tool workflows | MCP |
+
+For my use case — a personal database assistant with mixed use cases — the direct API method got the job done quickly. But if this were headed to production, especially anywhere near sensitive data, **MCP's structured, validated approach would be the safer bet.**
+
+## Key Takeaways
+
+1. **Know your environment first.** Python version, Streamlit version, and available system resources shape your architecture decisions more than you'd expect.
+2. **Local LLMs need real hardware.** If you don't have the RAM/GPU to spare, cloud APIs (especially free/fast options like Groq) will save you a ton of frustration.
+3. **Database dialects matter — a lot.** What works in PostgreSQL or MySQL can silently fail in Oracle. Prompt engineering has to account for this.
+4. **Direct API calls vs. MCP is a real trade-off**, not just a buzzword choice. Pick based on whether you need speed-to-build or production-grade structure.
+
+## What's Next
+
+I'm considering rebuilding this with a proper MCP server for SQLcl to get the security and structure benefits — especially if this evolves beyond a personal tool. If you're building something similar, I'd genuinely love to hear how you approached the LLM-to-SQL translation problem, especially for other "quirky" database dialects.
+
+---
+
+*Have you built something similar? What LLM + database combo are you using? Drop a comment below!*
