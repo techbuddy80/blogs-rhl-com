@@ -2,7 +2,8 @@
 title: "Refreshing a Non-Production Oracle Database with a Sparse Clone on Exadata"
 description: "A step-by-step walkthrough of refreshing a non-production Oracle database from a Test Master source using dbms_dnfs.clonedb_renamefile on an OCI Exadata VM Cluster."
 publishedAt: "2026-07-23"
-tags: ["oracle", "exadata", "database-refresh", "sparse-clone", "data-guard", "asm", "dba"]
+tags:
+  ["oracle", "exadata", "database-refresh", "sparse-clone", "data-guard", "asm", "dba"]
 category: "oci"
 draft: false
 ---
@@ -44,14 +45,14 @@ own lifecycle, which is why Step 1 below exists.
 
 ## Placeholders Used in This Post
 
-| Placeholder | Meaning |
-|---|---|
-| `<PRIMARY_DB>` | Primary database name (Data Guard) |
-| `<STBY_DB>` | Standby database name (Data Guard) |
-| `<DB_NAME>` | Target (non-production) database being refreshed — e.g. `WORKDB` |
-| `<old_pdb_name>` | Current PDB name as cloned from Test Master |
-| `<new_pdb_name>` | Target PDB name after rename |
-| `<DATE>` | Date stamp for script/folder naming, e.g. `07232026` |
+| Placeholder      | Meaning                                                          |
+| ---------------- | ---------------------------------------------------------------- |
+| `<PRIMARY_DB>`   | Primary database name (Data Guard)                               |
+| `<STBY_DB>`      | Standby database name (Data Guard)                               |
+| `<DB_NAME>`      | Target (non-production) database being refreshed — e.g. `WORKDB` |
+| `<old_pdb_name>` | Current PDB name as cloned from Test Master                      |
+| `<new_pdb_name>` | Target PDB name after rename                                     |
+| `<DATE>`         | Date stamp for script/folder naming, e.g. `07232026`             |
 
 Disk groups are shown generically as `DATA_DG` (regular datafile storage) and
 `SPARSE_DG` (the sparse clone target). Script paths are shown under a generic
@@ -297,16 +298,16 @@ srvctl status service -d <DB_NAME>
 
 ## Validation Checklist
 
-| Check | Expected Result |
-|---|---|
-| Database open | `OPEN`, no `ORA-` errors in the alert log |
-| RAC status | All configured instances up |
-| Services | All required services started |
-| Datafile locations | All reference `SPARSE_DG` / `<DB_NAME>`, none reference the Test Master path |
-| PDB name | Renamed to `<new_pdb_name>` and open |
-| Temp tablespace | Tempfiles present and online |
-| Application connectivity | Confirmed by the application/service owner |
-| Invalid objects | Recompiled, count at expected baseline |
+| Check                    | Expected Result                                                              |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| Database open            | `OPEN`, no `ORA-` errors in the alert log                                    |
+| RAC status               | All configured instances up                                                  |
+| Services                 | All required services started                                                |
+| Datafile locations       | All reference `SPARSE_DG` / `<DB_NAME>`, none reference the Test Master path |
+| PDB name                 | Renamed to `<new_pdb_name>` and open                                         |
+| Temp tablespace          | Tempfiles present and online                                                 |
+| Application connectivity | Confirmed by the application/service owner                                   |
+| Invalid objects          | Recompiled, count at expected baseline                                       |
 
 ## Closing Thoughts
 

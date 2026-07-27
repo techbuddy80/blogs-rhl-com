@@ -56,7 +56,7 @@ sdl                  5G QEMU HARDDISK
 asmcmd lsdg
 ```
 
-Or query directly from SQL*Plus:
+Or query directly from SQL\*Plus:
 
 ```sql
 sqlplus / as sysasm
@@ -142,12 +142,12 @@ Edit `/etc/exports` and add:
 
 Replace `192.168.1.0/24` with the subnet or specific IP addresses of the client servers that should be allowed to mount this share.
 
-| Option | Meaning |
-|---|---|
-| `rw` | Read/write access |
-| `sync` | Writes are committed to disk before the server replies |
-| `no_root_squash` | Root on the client remains root on the server |
-| `no_subtree_check` | Skips subtree checking for improved reliability |
+| Option             | Meaning                                                |
+| ------------------ | ------------------------------------------------------ |
+| `rw`               | Read/write access                                      |
+| `sync`             | Writes are committed to disk before the server replies |
+| `no_root_squash`   | Root on the client remains root on the server          |
+| `no_subtree_check` | Skips subtree checking for improved reliability        |
 
 Apply the export:
 

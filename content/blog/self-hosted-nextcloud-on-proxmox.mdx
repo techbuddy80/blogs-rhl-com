@@ -3,7 +3,17 @@ title: "Building My Own Google Drive: A Production-Grade Personal Cloud on Proxm
 description: "A from-scratch walkthrough of replacing Google Drive and Dropbox with a self-hosted Nextcloud stack — Docker Compose, ZFS, Cloudflare Tunnel, and every real bug I hit along the way."
 publishedAt: "2026-07-20"
 category: "homelab"
-tags: ["proxmox", "zfs", "nextcloud", "docker", "cloudflare-tunnel", "postgresql", "redis", "self-hosting"]
+tags:
+  [
+    "proxmox",
+    "zfs",
+    "nextcloud",
+    "docker",
+    "cloudflare-tunnel",
+    "postgresql",
+    "redis",
+    "self-hosting",
+  ]
 author: "RamShankar"
 ---
 
@@ -32,12 +42,12 @@ the same thing: **every real bug I hit and how I actually fixed it.**
 
 I compared three open-source options before committing:
 
-| | **Nextcloud** | **Seafile** | **OpenCloud** |
-|---|---|---|---|
-| Maturity | Mature, huge community, enterprise-backed | Mature, smaller community | Very new (2024 fork of ownCloud Infinite Scale) |
-| Mobile apps | Full-featured, camera auto-upload built in | Full-featured | Less mature |
-| Extensibility | Huge app ecosystem (calendar, contacts, Office, Talk) | Sync-and-share focused, narrow scope | Minimal today |
-| Long-term risk | Low — well-funded, widely adopted | Low-moderate | Higher — unproven upgrade paths |
+|                | **Nextcloud**                                         | **Seafile**                          | **OpenCloud**                                   |
+| -------------- | ----------------------------------------------------- | ------------------------------------ | ----------------------------------------------- |
+| Maturity       | Mature, huge community, enterprise-backed             | Mature, smaller community            | Very new (2024 fork of ownCloud Infinite Scale) |
+| Mobile apps    | Full-featured, camera auto-upload built in            | Full-featured                        | Less mature                                     |
+| Extensibility  | Huge app ecosystem (calendar, contacts, Office, Talk) | Sync-and-share focused, narrow scope | Minimal today                                   |
+| Long-term risk | Low — well-funded, widely adopted                     | Low-moderate                         | Higher — unproven upgrade paths                 |
 
 **I went with Nextcloud.** Seafile's sync engine is arguably technically
 superior for pure file sync, but I wanted more than that — sharing, and
@@ -66,7 +76,7 @@ existing Proxmox VM storage pools. Here's why, and how.
   a monthly full `rsync` re-scan.
 
 Even on a single disk with no redundancy, checksumming alone is worth it —
-you find out *when* corruption happens instead of discovering it years
+you find out _when_ corruption happens instead of discovering it years
 later during a restore.
 
 ### Setting up the pool
@@ -242,6 +252,7 @@ be owned by 82, not 33, or the entrypoint's own file copy step fails
 partway through, over and over, on every restart.
 
 **Fix:**
+
 ```bash
 docker compose exec app cat /etc/passwd | grep www-data
 # confirm the real UID before assuming anything
@@ -344,7 +355,7 @@ Hostname's TLS settings, set **"Origin Server Name"** explicitly to
 
 ### 9. Cloudflare 502 — `x509: certificate signed by unknown authority`
 
-After fixing #8, a *different* error appeared — Cloudflare now correctly
+After fixing #8, a _different_ error appeared — Cloudflare now correctly
 sent the right SNI, but was trying to validate Caddy's self-signed cert
 against a public CA (which will always fail for a self-signed cert).
 

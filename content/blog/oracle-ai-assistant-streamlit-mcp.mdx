@@ -6,9 +6,10 @@ category: "ai"
 tags: ["oracle", "streamlit", "llm", "mcp", "ollama", "groq", "sql"]
 author: "RamShankar"
 ---
+
 ## Introduction
 
-Ever wished you could just *talk* to your Oracle database instead of writing SQL queries by hand? That's exactly what I set out to build — a natural language interface to Oracle DB using Streamlit, powered by an LLM backend. This post walks through the build, the roadblocks I hit along the way, and an important architectural question that came up: **should this use MCP (Model Context Protocol), or is a simpler direct API approach good enough?**
+Ever wished you could just _talk_ to your Oracle database instead of writing SQL queries by hand? That's exactly what I set out to build — a natural language interface to Oracle DB using Streamlit, powered by an LLM backend. This post walks through the build, the roadblocks I hit along the way, and an important architectural question that came up: **should this use MCP (Model Context Protocol), or is a simpler direct API approach good enough?**
 
 ## The Goal
 
@@ -17,6 +18,7 @@ Build a web app that lets you type something like:
 > "Get highest paid employee details with their department"
 
 ...and have it automatically:
+
 1. Convert that into valid Oracle SQL
 2. Execute it against a real Oracle database
 3. Return the results in a clean, readable format
@@ -41,7 +43,7 @@ Running on an Oracle Enterprise Linux server with **Python 3.6.8**, I immediatel
 - `subprocess.run()`'s `capture_output` parameter — added in Python 3.7 — wasn't supported
 - F-strings needed to be swapped for `.format()` in a few edge cases
 
-**Lesson learned:** always check your target environment's Python version *before* writing code that assumes the latest syntax. Enterprise servers often run older, more stable versions for good reason.
+**Lesson learned:** always check your target environment's Python version _before_ writing code that assumes the latest syntax. Enterprise servers often run older, more stable versions for good reason.
 
 ## Roadblock #2: Streamlit Version Gaps
 
@@ -57,6 +59,7 @@ Small trade-offs, but the app remained fully functional.
 This was the big one. Running **Llama 3.1 8B** via Ollama on a server with 7.5GB RAM (and already using swap) meant every query took 60+ seconds — sometimes timing out entirely. Even switching to a smaller model like Phi-3 Mini didn't fully solve it.
 
 **The fix:** switch to a cloud-hosted LLM. I tried:
+
 - **Claude API** — excellent SQL generation, but hit a billing/credits snag initially
 - **Groq** — free tier, blazing fast (1-2 second responses) thanks to their custom inference hardware
 
@@ -70,7 +73,7 @@ Here's a subtle one that tripped up the LLM repeatedly. Ask any modern SQL engin
 SELECT * FROM employees ORDER BY salary DESC FETCH FIRST 1 ROWS ONLY;
 ```
 
-This works in PostgreSQL and SQL Server, but **fails silently or errors out on Oracle 12c and earlier**. Oracle requires the older `ROWNUM` pseudo-column instead — and critically, `ROWNUM` is evaluated *before* `ORDER BY`. So this naive approach:
+This works in PostgreSQL and SQL Server, but **fails silently or errors out on Oracle 12c and earlier**. Oracle requires the older `ROWNUM` pseudo-column instead — and critically, `ROWNUM` is evaluated _before_ `ORDER BY`. So this naive approach:
 
 ```sql
 SELECT * FROM employees ORDER BY salary DESC WHERE ROWNUM = 1; -- WRONG
@@ -97,6 +100,7 @@ Streamlit → LLM API call → parse SQL from text response → subprocess.run("
 ```
 
 This is simple, fast to build, and works with any LLM provider. But it has real limitations:
+
 - SQL has to be extracted from free-text LLM responses using regex (fragile)
 - No structured validation of what the LLM is asking to execute
 - No persistent session or transaction management
@@ -122,6 +126,7 @@ With MCP, the LLM doesn't generate raw text that you then parse — it calls **s
 ```
 
 This gives you:
+
 - **Schema validation** before anything touches the database
 - **Better error handling** through standardized MCP responses
 - **Composability** — easy to add more tools (schema inspection, transaction control, etc.)
@@ -129,13 +134,13 @@ This gives you:
 
 ### So Which One Should You Use?
 
-| Use Case | Recommended Approach |
-|---|---|
-| Quick prototype / personal tool | Direct API method |
-| Need multiple LLM providers | Direct API method |
-| Production system | MCP |
-| Security-sensitive environment | MCP |
-| Complex multi-tool workflows | MCP |
+| Use Case                        | Recommended Approach |
+| ------------------------------- | -------------------- |
+| Quick prototype / personal tool | Direct API method    |
+| Need multiple LLM providers     | Direct API method    |
+| Production system               | MCP                  |
+| Security-sensitive environment  | MCP                  |
+| Complex multi-tool workflows    | MCP                  |
 
 For my use case — a personal database assistant with mixed use cases — the direct API method got the job done quickly. But if this were headed to production, especially anywhere near sensitive data, **MCP's structured, validated approach would be the safer bet.**
 
@@ -152,4 +157,4 @@ I'm considering rebuilding this with a proper MCP server for SQLcl to get the se
 
 ---
 
-*Have you built something similar? What LLM + database combo are you using? Drop a comment below!*
+_Have you built something similar? What LLM + database combo are you using? Drop a comment below!_

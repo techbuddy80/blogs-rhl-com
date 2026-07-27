@@ -6,6 +6,7 @@ category: "oci"
 tags: ["OCI", "Oracle", "Exadata", "Python", "Monitoring", "Cloud"]
 draft: false
 ---
+
 ## Overview
 
 OCI Exadata Cloud Service (ExaCS) supports **dynamic CPU scaling** — the ability to scale OCPU/ECPU counts up or down without downtime. Oracle provides a reference script via the [OCI blog](https://blogs.oracle.com/cloud-infrastructure/config-dynamic-scaling-oracle-exadata-cloud) that handles the scaling logic automatically based on thresholds you define.
@@ -48,13 +49,13 @@ Key concepts:
 
 ## Prerequisites
 
-| Requirement | Details |
-|---|---|
-| OCI Exadata Cloud Service | ExaCS or ExaDB-D |
-| OS | Oracle Linux 7 / 8 on VM cluster nodes |
-| Python | 3.6+ (stdlib only — no pip needed) |
-| IAM permissions | `manage db-systems` or equivalent dynamic group policy |
-| OCI CLI | Configured on the VM cluster node |
+| Requirement               | Details                                                |
+| ------------------------- | ------------------------------------------------------ |
+| OCI Exadata Cloud Service | ExaCS or ExaDB-D                                       |
+| OS                        | Oracle Linux 7 / 8 on VM cluster nodes                 |
+| Python                    | 3.6+ (stdlib only — no pip needed)                     |
+| IAM permissions           | `manage db-systems` or equivalent dynamic group policy |
+| OCI CLI                   | Configured on the VM cluster node                      |
 
 ---
 
@@ -229,12 +230,12 @@ You should see output similar to:
 
 Key log entries to watch for:
 
-| Pattern | Meaning |
-|---|---|
-| `Current OCPU/ECPU.....: 96` | Current OCPU count reported |
+| Pattern                                           | Meaning                                      |
+| ------------------------------------------------- | -------------------------------------------- |
+| `Current OCPU/ECPU.....: 96`                      | Current OCPU count reported                  |
 | `WARNING: ... equals minocpu, skipping scaledown` | Tried to scale down but already at the floor |
-| Change in OCPU value between lines | A scaling event occurred |
-| New `[pid=XXXXX]` value | The daemon process restarted |
+| Change in OCPU value between lines                | A scaling event occurred                     |
+| New `[pid=XXXXX]` value                           | The daemon process restarted                 |
 
 ---
 
@@ -397,23 +398,23 @@ xdg-open ~/Desktop/NonProd_OCI_Cluster_CPU_Scaling_202606151139.html
 
 The HTML chart includes:
 
-| Element | Description |
-|---|---|
-| **Stats bar** | Peak, min, avg OCPU; scale-up count; scale-down count; min CPU warnings; total samples |
-| **Blue step line** | OCPU/ECPU count over time (stepped to show exact change points) |
-| **Green dot ▲** | Scale-up event — OCPU count increased |
-| **Red dot ▼** | Scale-down event — OCPU count decreased |
-| **Amber vertical line** | Min CPU warning — daemon tried to scale down but was already at `minocpu` floor |
-| **Purple dashed line** | Daemon process restart detected (PID change in log) |
+| Element                 | Description                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------- |
+| **Stats bar**           | Peak, min, avg OCPU; scale-up count; scale-down count; min CPU warnings; total samples |
+| **Blue step line**      | OCPU/ECPU count over time (stepped to show exact change points)                        |
+| **Green dot ▲**         | Scale-up event — OCPU count increased                                                  |
+| **Red dot ▼**           | Scale-down event — OCPU count decreased                                                |
+| **Amber vertical line** | Min CPU warning — daemon tried to scale down but was already at `minocpu` floor        |
+| **Purple dashed line**  | Daemon process restart detected (PID change in log)                                    |
 
 The X-axis tick spacing adapts automatically to the time window:
 
-| Time window | X-axis ticks |
-|---|---|
-| ≤ 24 hours | Every 2 hours |
-| ≤ 3 days | Every 6 hours |
-| ≤ 7 days | Every 12 hours |
-| > 7 days | Every 24 hours |
+| Time window | X-axis ticks   |
+| ----------- | -------------- |
+| ≤ 24 hours  | Every 2 hours  |
+| ≤ 3 days    | Every 6 hours  |
+| ≤ 7 days    | Every 12 hours |
+| > 7 days    | Every 24 hours |
 
 ---
 
