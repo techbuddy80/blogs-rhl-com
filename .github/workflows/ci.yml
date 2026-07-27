@@ -14,14 +14,14 @@ concurrency:
 
 jobs:
   validate:
-    name: Lint, typecheck, build
+    name: Format, build, lint, typecheck
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: "npm"
@@ -29,18 +29,32 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Type-check
-        run: npm run typecheck
-
       - name: Format check
         run: npm run format:check
 
+      # Must run before lint/typecheck below: Content Collections only
+      # generates its types (.content-collections/generated, imported
+      # throughout the app as "content-collections") as a side effect of
+      # `next build` via the withContentCollections config plugin — there's
+      # no standalone CLI to generate just the types. Running lint/typecheck
+      # first (as an earlier version of this workflow did) fails with
+      # "Cannot find module 'content-collections'" on every file that
+      # imports it, plus cascading "implicitly has an 'any' type" errors on
+      # anything derived from that import.
       - name: Build
         run: npm run build
         env:
           # Metadata/OpenGraph reference this at build time; a placeholder
           # is fine here since CI never actually serves the output.
           NEXT_PUBLIC_SITE_URL: https://blogs.ramhl.com
+
+      # Next's build already runs its own internal lint + type-check phase
+      # (see "Linting and checking validity of types" in the build output
+      # above), so these are partly a re-check — kept as separate steps
+      # mainly for clearer, individually-labeled CI annotations if either
+      # ever disagrees with the build's internal pass.
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
