@@ -35,6 +35,12 @@ export const categories = [
       "Cross-engine architecture, performance tuning, HA/DR, backup & recovery, migration.",
   },
   {
+    slug: "oci",
+    label: "OCI",
+    description:
+      "Oracle Cloud Infrastructure — Exadata Cloud Service, Autonomous Database, OCI networking and compute,Oracle@AWS.",
+  },
+  {
     slug: "cloud",
     label: "Cloud",
     description: "AWS, OCI, Azure.",
@@ -51,11 +57,6 @@ export const categories = [
     description: "Terraform, Ansible, GitHub Actions, Jenkins, CI/CD, Python.",
   },
   {
-    slug: "containers-kubernetes",
-    label: "Containers & Kubernetes",
-    description: "Docker, Podman, Kubernetes, Helm, GitOps.",
-  },
-  {
     slug: "homelab",
     label: "Homelab",
     description: "Proxmox, LXC, VMs, TrueNAS, Grafana, Prometheus.",
@@ -64,11 +65,6 @@ export const categories = [
     slug: "linux",
     label: "Linux",
     description: "Linux administration, tuning, and internals.",
-  },
-  {
-    slug: "security",
-    label: "Security",
-    description: "Hardening, secrets management, security architecture.",
   },
   {
     slug: "ai",

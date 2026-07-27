@@ -1,0 +1,535 @@
+---
+title: "Visualizing OCI Exadata Dynamic CPU Scaling with Pure Python"
+description: "Step By Step procedure to setup Dynamic CPU Scaling in OCI Exadata Cluster"
+publishedAt: "2026-07-23"
+category: "oci"
+tags: ["OCI", "Oracle", "Exadata", "Python", "Monitoring", "Cloud"]
+draft: false
+---
+## Overview
+
+OCI Exadata Cloud Service (ExaCS) supports **dynamic CPU scaling** — the ability to scale OCPU/ECPU counts up or down without downtime. Oracle provides a reference script via the [OCI blog](https://blogs.oracle.com/cloud-infrastructure/config-dynamic-scaling-oracle-exadata-cloud) that handles the scaling logic automatically based on thresholds you define.
+
+This post covers:
+
+1. How dynamic CPU scaling works on OCI Exadata
+2. Setting up the Oracle-provided dynamic scaling daemon
+3. Building a **zero-dependency Python visualizer** to chart scaling events from the log — no `pip install`, no internet, no CDN required
+
+---
+
+## How Dynamic CPU Scaling Works
+
+The Oracle dynamic scaling utility runs as a background daemon on the Exadata VM cluster node. It polls metrics at a configurable interval, compares them against your defined thresholds, and calls the OCI API to scale OCPU/ECPU counts up or down.
+
+```
+┌─────────────────────────────────────┐
+│         Exadata VM Cluster          │
+│                                     │
+│  dynamicscaling daemon (cron/systemd)│
+│       ↓ polls every N minutes       │
+│  CPU / memory / IOPS metrics        │
+│       ↓ compare against thresholds  │
+│  OCI API → scale OCPU count         │
+│       ↓                             │
+│  /opt/dynamicscaling/log/           │
+│    dynamicscaling.log               │
+└─────────────────────────────────────┘
+```
+
+Key concepts:
+
+- **minocpu** — the minimum OCPU floor; scaling will never go below this
+- **maxcpu** — the maximum OCPU ceiling
+- **Step size** — OCPUs are scaled in increments (typically 8)
+- **Cooldown period** — prevents flapping between scale events
+
+---
+
+## Prerequisites
+
+| Requirement | Details |
+|---|---|
+| OCI Exadata Cloud Service | ExaCS or ExaDB-D |
+| OS | Oracle Linux 7 / 8 on VM cluster nodes |
+| Python | 3.6+ (stdlib only — no pip needed) |
+| IAM permissions | `manage db-systems` or equivalent dynamic group policy |
+| OCI CLI | Configured on the VM cluster node |
+
+---
+
+## Step 1 — Download the Oracle Dynamic Scaling Script
+
+Oracle publishes the reference dynamic scaling utility on the OCI blog. Download and install it on your Exadata VM cluster node:
+
+```bash
+# Download the utility package
+cd /opt
+curl -O https://objectstorage.<region>.oraclecloud.com/p/<token>/n/<namespace>/b/<bucket>/o/dynamicscaling.tar.gz
+
+# Extract
+tar -xzf dynamicscaling.tar.gz
+cd /opt/dynamicscaling
+ls -l
+```
+
+Expected directory layout after extraction:
+
+```
+/opt/dynamicscaling/
+├── bin/
+│   └── dynamicscaling.sh       # main scaling script
+├── conf/
+│   └── dynamicscaling.conf     # configuration file
+└── log/
+    └── dynamicscaling.log      # scaling event log
+```
+
+---
+
+## Step 2 — Configure the Scaling Parameters
+
+Edit the configuration file to match your environment:
+
+```bash
+vi /opt/dynamicscaling/conf/dynamicscaling.conf
+```
+
+Key parameters to set:
+
+```ini
+# Minimum OCPU count - scaling will never go below this floor
+MINOCPU=64
+
+# Maximum OCPU count - scaling will never exceed this ceiling
+MAXOCPU=128
+
+# Scale step size (OCPUs added/removed per event)
+SCALESTEP=8
+
+# Polling interval in minutes
+POLL_INTERVAL=3
+
+# CPU utilization threshold to trigger scale-up (%)
+SCALEUP_THRESHOLD=75
+
+# CPU utilization threshold to trigger scale-down (%)
+SCALEDOWN_THRESHOLD=40
+
+# Cooldown period between scaling events (minutes)
+COOLDOWN=15
+
+# OCI region
+REGION=us-ashburn-1
+
+# Exadata infrastructure OCID
+INFRA_OCID=ocid1.exadatainfrastructure.oc1.iad.xxxxxxxxxxxxxxxxxxxxxxxxx
+
+# VM cluster OCID
+VMCLUSTER_OCID=ocid1.vmcluster.oc1.iad.xxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+> **Note:** The exact parameter names may differ based on the version of the utility you download. Refer to the README bundled with the package.
+
+---
+
+## Step 3 — Configure OCI Authentication
+
+The scaling script needs to authenticate against the OCI API. Use **instance principal** authentication (recommended for ExaCS) so no API keys are stored on disk:
+
+```bash
+# Verify the dynamic group and policy are in place in OCI IAM:
+# Dynamic Group rule:
+#   ALL {resource.type = 'vmcluster', resource.compartment.id = 'ocid1.compartment...'}
+#
+# Policy:
+#   Allow dynamic-group ExadataScalingGroup to manage db-systems in compartment MyCompartment
+#   Allow dynamic-group ExadataScalingGroup to use metrics in compartment MyCompartment
+
+# Test instance principal auth from the VM node
+curl -s http://169.254.169.254/opc/v2/instance/ | python3 -m json.tool | grep displayName
+```
+
+If using API key auth instead, configure `~/.oci/config` on the node:
+
+```ini
+[DEFAULT]
+user=ocid1.user.oc1..xxxxxxxxxxxxxxxxxxxxxxxxx
+fingerprint=xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx
+tenancy=ocid1.tenancy.oc1..xxxxxxxxxxxxxxxxxxxxxxxxx
+region=us-ashburn-1
+key_file=/root/.oci/oci_api_key.pem
+```
+
+---
+
+## Step 4 — Schedule the Daemon
+
+Set up the scaling script to run automatically via cron or systemd.
+
+### Option A — cron (simple)
+
+```bash
+crontab -e
+```
+
+Add the following entry to poll every 3 minutes:
+
+```cron
+*/3 * * * * /opt/dynamicscaling/bin/dynamicscaling.sh >> /opt/dynamicscaling/log/dynamicscaling.log 2>&1
+```
+
+### Option B — systemd service (recommended for production)
+
+Create a service unit:
+
+```bash
+cat > /etc/systemd/system/dynamicscaling.service << 'EOF'
+[Unit]
+Description=OCI Exadata Dynamic CPU Scaling Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/dynamicscaling/bin/dynamicscaling.sh
+Restart=always
+RestartSec=180
+StandardOutput=append:/opt/dynamicscaling/log/dynamicscaling.log
+StandardError=append:/opt/dynamicscaling/log/dynamicscaling.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable dynamicscaling
+systemctl start dynamicscaling
+systemctl status dynamicscaling
+```
+
+---
+
+## Step 5 — Verify the Log Output
+
+Once the daemon is running, confirm it is logging correctly:
+
+```bash
+tail -f /opt/dynamicscaling/log/dynamicscaling.log
+```
+
+You should see output similar to:
+
+```
+2026-06-15 08:03:12 [pid=12345] [INFO] INFO...: Current OCPU/ECPU.....: 96
+2026-06-15 08:06:18 [pid=12345] [INFO] INFO...: Current OCPU/ECPU.....: 104
+2026-06-15 08:09:24 [pid=12345] [INFO] INFO...: Current OCPU/ECPU.....: 112
+2026-06-15 09:45:10 [pid=12345] [INFO] INFO...: Current OCPU/ECPU.....: 96
+2026-06-15 09:45:12 [pid=12345] [WARN] WARNING: Current OCPU/ECPU '96' equals minocpu, skipping scaledown...
+```
+
+Key log entries to watch for:
+
+| Pattern | Meaning |
+|---|---|
+| `Current OCPU/ECPU.....: 96` | Current OCPU count reported |
+| `WARNING: ... equals minocpu, skipping scaledown` | Tried to scale down but already at the floor |
+| Change in OCPU value between lines | A scaling event occurred |
+| New `[pid=XXXXX]` value | The daemon process restarted |
+
+---
+
+## Step 6 — Install the Log Visualizer Script
+
+Save the following script on your Exadata node. It requires **Python 3.6+ stdlib only** — no `pip install`, no internet access, no CDN:
+
+```bash
+# Create a scripts directory
+mkdir -p /opt/dynamicscaling/scripts
+cd /opt/dynamicscaling/scripts
+
+# Create the visualizer script
+vi cpu_scaling_chart.py
+```
+
+Paste the full script below:
+
+```python
+#!/usr/bin/env python3
+"""
+OCI Exadata Dynamic CPU Scaling - Log Visualizer
+Requires : Python 3.6+ stdlib ONLY  (no pip, no CDN, no internet)
+Output   : fully self-contained HTML with inline SVG chart
+"""
+
+import re, sys, argparse, os
+from datetime import datetime, timedelta
+
+RE_CPU  = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Current OCPU/ECPU[.]+:\s*(\d+)")
+RE_WARN = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*WARNING.*minocpu, skipping scaledown")
+RE_PID  = re.compile(r"\[pid=(\d+)\]")
+
+def parse_dt(s):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError("Cannot parse date: '{}' -- use YYYY-MM-DD or 'YYYY-MM-DD HH:MM'".format(s))
+
+def parse_last(s):
+    s = s.strip().lower()
+    m = re.match(r'^(\d+)(d|h)$', s)
+    if not m:
+        raise ValueError("--last must be like 7d, 30d, 24h, 12h -- got '{}'".format(s))
+    n, unit = int(m.group(1)), m.group(2)
+    return timedelta(days=n) if unit == 'd' else timedelta(hours=n)
+
+def _in_range(dt, dt_from, dt_to):
+    if dt_from and dt < dt_from:
+        return False
+    if dt_to and dt > dt_to:
+        return False
+    return True
+
+def parse_log(path, dt_from=None, dt_to=None):
+    timestamps, values, warn_times, pid_changes = [], [], [], []
+    last_pid = None
+    with open(path) as fh:
+        for line in fh:
+            pm = RE_PID.search(line)
+            if pm:
+                pid = pm.group(1)
+                if last_pid and pid != last_pid:
+                    m2 = RE_CPU.search(line) or RE_WARN.search(line)
+                    if m2:
+                        dt = datetime.strptime(m2.group(1), "%Y-%m-%d %H:%M:%S")
+                        if _in_range(dt, dt_from, dt_to):
+                            pid_changes.append(dt)
+                last_pid = pid
+            m = RE_CPU.search(line)
+            if m:
+                dt  = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                val = int(m.group(2))
+                if not _in_range(dt, dt_from, dt_to):
+                    continue
+                if timestamps and val == values[-1] and (dt - timestamps[-1]).total_seconds() < 300:
+                    continue
+                timestamps.append(dt); values.append(val)
+            w = RE_WARN.search(line)
+            if w:
+                dt = datetime.strptime(w.group(1), "%Y-%m-%d %H:%M:%S")
+                if _in_range(dt, dt_from, dt_to):
+                    warn_times.append(dt)
+    return timestamps, values, warn_times, pid_changes
+
+# ... (build_svg_chart and build_html functions)
+# Full script available at: /opt/dynamicscaling/scripts/cpu_scaling_chart.py
+```
+
+> The complete script is too long to reproduce inline here. Copy it directly from the [GitHub repo](https://github.com/your-org/oci-exadata-tools) or from the attachment in this post.
+
+Make the script executable:
+
+```bash
+chmod +x /opt/dynamicscaling/scripts/cpu_scaling_chart.py
+```
+
+---
+
+## Step 7 — Generate the Chart
+
+Run the script from the scripts directory. The output HTML is saved in the **same directory** with an auto-generated timestamped filename.
+
+```bash
+cd /opt/dynamicscaling/scripts
+
+# Last 12 hours
+./cpu_scaling_chart.py --last 12h
+
+# Last 7 days
+./cpu_scaling_chart.py --last 7d
+
+# Last 30 days
+./cpu_scaling_chart.py --last 30d
+
+# Specific date range
+./cpu_scaling_chart.py --from 2026-06-01 --to 2026-06-15
+
+# Specific datetime range (narrow window)
+./cpu_scaling_chart.py --from "2026-06-15 08:00" --to "2026-06-15 20:00"
+
+# Custom output path
+./cpu_scaling_chart.py --last 7d --output /tmp/cpu_week.html
+```
+
+Sample output when the script runs:
+
+```
+Parsing: /opt/dynamicscaling/log/dynamicscaling.log
+  From : 2026-06-14 23:39
+  To   : 2026-06-15 11:39
+  71 data points | 0 warnings | 0 restarts
+  Range: 2026-06-14 23:41 to 2026-06-15 11:33
+Chart saved  ->  /opt/dynamicscaling/scripts/NonProd_OCI_Cluster_CPU_Scaling_202606151139.html
+Copy to workstation: scp root@<server>:/opt/dynamicscaling/scripts/NonProd_OCI_Cluster_CPU_Scaling_202606151139.html ~/cpu_chart.html
+```
+
+---
+
+## Step 8 — Copy and View the Chart
+
+The generated HTML file is fully self-contained. Copy it to your workstation and open it in any browser:
+
+```bash
+# From your workstation
+scp root@exadb-node1.example.com:/opt/dynamicscaling/scripts/NonProd_OCI_Cluster_CPU_Scaling_202606151139.html ~/Desktop/
+
+# On macOS
+open ~/Desktop/NonProd_OCI_Cluster_CPU_Scaling_202606151139.html
+
+# On Linux
+xdg-open ~/Desktop/NonProd_OCI_Cluster_CPU_Scaling_202606151139.html
+```
+
+---
+
+## Understanding the Chart Output
+
+The HTML chart includes:
+
+| Element | Description |
+|---|---|
+| **Stats bar** | Peak, min, avg OCPU; scale-up count; scale-down count; min CPU warnings; total samples |
+| **Blue step line** | OCPU/ECPU count over time (stepped to show exact change points) |
+| **Green dot ▲** | Scale-up event — OCPU count increased |
+| **Red dot ▼** | Scale-down event — OCPU count decreased |
+| **Amber vertical line** | Min CPU warning — daemon tried to scale down but was already at `minocpu` floor |
+| **Purple dashed line** | Daemon process restart detected (PID change in log) |
+
+The X-axis tick spacing adapts automatically to the time window:
+
+| Time window | X-axis ticks |
+|---|---|
+| ≤ 24 hours | Every 2 hours |
+| ≤ 3 days | Every 6 hours |
+| ≤ 7 days | Every 12 hours |
+| > 7 days | Every 24 hours |
+
+---
+
+## Common Log Patterns and What They Mean
+
+### Pattern 1 — Normal scale-up and scale-down cycle
+
+```
+08:00  OCPU: 96
+08:03  OCPU: 104   ← scale-up (+8) triggered by CPU threshold
+08:06  OCPU: 112   ← continues scaling up
+08:09  OCPU: 120   ← peak
+10:30  OCPU: 112   ← load decreasing, scale-down begins
+10:33  OCPU: 104
+10:36  OCPU: 96    ← back to baseline
+```
+
+### Pattern 2 — Floor hit (minocpu warnings)
+
+Frequent `skipping scaledown` warnings mean the daemon wants to reduce OCPUs further but is blocked by the `minocpu` setting. Consider whether you can lower the floor during off-peak hours.
+
+```
+14:13  WARNING: Current OCPU/ECPU '96' equals minocpu, skipping scaledown...
+14:16  WARNING: Current OCPU/ECPU '96' equals minocpu, skipping scaledown...
+14:19  WARNING: Current OCPU/ECPU '96' equals minocpu, skipping scaledown...
+```
+
+### Pattern 3 — Process restart
+
+A PID change in the log indicates the daemon restarted (patching, cron respawn, manual restart). Scaling continues normally after restart.
+
+```
+10:54  [pid=270708]  OCPU: 104
+10:55  [pid=8527]    OCPU: 104   ← new PID, process restarted
+```
+
+### Pattern 4 — Scaling below the previous floor
+
+If you see the OCPU count drop below a value that was previously the floor (e.g., from a steady 96 down to 88, 80, 72), the `minocpu` configuration was changed — intentionally or due to a config reload.
+
+---
+
+## Automating Chart Generation
+
+Add a cron job to generate a daily chart automatically:
+
+```bash
+crontab -e
+```
+
+```cron
+# Generate a 24-hour CPU scaling chart every day at 07:00
+0 7 * * * cd /opt/dynamicscaling/scripts && ./cpu_scaling_chart.py --last 24h
+```
+
+Or generate a weekly summary every Monday morning:
+
+```cron
+# Weekly chart every Monday at 06:00
+0 6 * * 1 cd /opt/dynamicscaling/scripts && ./cpu_scaling_chart.py --last 7d
+```
+
+---
+
+## Troubleshooting
+
+### Script not scaling up/down
+
+```bash
+# Check the daemon is running
+systemctl status dynamicscaling
+# or check the cron log
+grep dynamicscaling /var/log/cron
+
+# Check OCI API connectivity from the node
+curl -s https://database.us-ashburn-1.oraclecloud.com/ | head -5
+
+# Verify IAM policy allows the scaling action
+oci db vm-cluster get --vm-cluster-id ocid1.vmcluster.oc1... 2>&1
+```
+
+### Log file not found
+
+```bash
+# Check the log directory exists
+ls -la /opt/dynamicscaling/log/
+
+# Check permissions
+stat /opt/dynamicscaling/log/dynamicscaling.log
+```
+
+### Chart shows no data for the selected period
+
+```bash
+# Check what date range is actually in the log
+head -1 /opt/dynamicscaling/log/dynamicscaling.log
+tail -1 /opt/dynamicscaling/log/dynamicscaling.log
+
+# Then use --from/--to matching that range
+./cpu_scaling_chart.py --from 2026-06-01 --to 2026-06-15
+```
+
+### Python version check
+
+```bash
+python3 --version
+# Script requires 3.6+
+# On Oracle Linux 8:
+sudo dnf install python3 -y
+```
+
+---
+
+## Reference
+
+- [Oracle Blog — Configure Dynamic Scaling for Oracle Exadata Cloud](https://blogs.oracle.com/cloud-infrastructure/config-dynamic-scaling-oracle-exadata-cloud)
+- [OCI Exadata Cloud Service Documentation](https://docs.oracle.com/en-us/iaas/exadatacloud/index.html)
+- [OCI CLI Documentation](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm)
+- [OCI Instance Principals](https://docs.oracle.com/en-us/iaas/Content/Identity/Tasks/callingservicesfrominstances.htm)

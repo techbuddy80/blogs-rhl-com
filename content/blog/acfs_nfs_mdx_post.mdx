@@ -1,0 +1,233 @@
+---
+title: "Setting Up Oracle ACFS and Sharing It Over NFS"
+description: "A step-by-step walkthrough of creating an Oracle ASM Cluster File System (ACFS) volume and exporting it via NFS for cross-server access."
+publishedAt: "2026-07-23"
+tags: ["oracle", "acfs", "asm", "nfs", "database", "linux"]
+category: "oracle"
+---
+
+## Overview
+
+Oracle ASM Cluster File System (ACFS) provides a general-purpose, POSIX-compliant filesystem built on top of ASM storage. While ACFS is natively cluster-aware, there are scenarios where you need to share an ACFS-backed volume with servers outside the cluster — for example, exposing shared storage to an application server or a secondary environment. This post walks through creating an ACFS volume and exporting it via NFS so it can be mounted on a remote client.
+
+This setup was tested in a homelab environment running Oracle Grid Infrastructure with ASM. Adjust disk names, disk group names, and subnets to match your own environment.
+
+## Prerequisites
+
+Before starting, make sure you have:
+
+- Oracle Grid Infrastructure (GI) with ASM configured
+- An ASM Disk Group available for ACFS (e.g., `+DATA`)
+- Clusterware up and running — verify with:
+
+```bash
+crsctl check cluster
+```
+
+- NFS packages installed on both the GI server and the target client server
+
+## Step 1: Identify Available Disks
+
+Start by listing the block devices attached to the server to find a candidate disk for the new disk group.
+
+```bash
+lsblk -d -o NAME,SIZE,MODEL
+```
+
+```
+NAME               SIZE MODEL
+sda                 30G QEMU HARDDISK
+sdb                 20G QEMU HARDDISK
+sdc                 20G QEMU HARDDISK
+sdd                 30G QEMU HARDDISK
+sde                 20G QEMU HARDDISK
+sdf                 10G QEMU HARDDISK
+sdg                 20G QEMU HARDDISK
+sdh                 50G QEMU HARDDISK
+sdi                 32G QEMU HARDDISK
+sdj                 50G QEMU HARDDISK
+sdk                 10G QEMU HARDDISK
+sdl                  5G QEMU HARDDISK
+```
+
+## Step 2: Check Existing ASM Disk Groups
+
+```bash
+asmcmd lsdg
+```
+
+Or query directly from SQL*Plus:
+
+```sql
+sqlplus / as sysasm
+
+SQL> select name, state, type, total_mb, free_mb from v$asm_diskgroup;
+```
+
+If the ASM disk string doesn't already cover your target device, update it:
+
+```sql
+alter system set asm_diskstring = '/dev/sd*' scope=spfile;
+```
+
+## Step 3: Create the ASM Disk Group
+
+```sql
+create diskgroup NFS external redundancy disk '/dev/sdl';
+alter diskgroup NFS mount;
+```
+
+## Step 4: Create the ACFS Volume
+
+```bash
+asmcmd volcreate -G NFS -s 4900M acfs_vol1
+```
+
+Verify the volume was created successfully:
+
+```bash
+asmcmd volinfo --all
+asmcmd volinfo -G NFS acfs_vol1
+```
+
+## Step 5: Create and Mount the ACFS Filesystem
+
+Format the volume with ACFS:
+
+```bash
+sudo /sbin/mkfs.acfs -n NFSVOL /dev/asm/acfs_vol1-xxx
+```
+
+Replace `xxx` with the actual volume device suffix returned by `volinfo` (e.g., `-217`).
+
+Create a mount point and mount the filesystem:
+
+```bash
+sudo mkdir -p /acfsvol
+sudo mount -t acfs /dev/asm/acfs_vol1-xxx /acfsvol
+df -h | grep acfs
+```
+
+### Auto-Mount at Boot (Optional)
+
+Add an entry to `/etc/fstab`:
+
+```
+/dev/asm/acfs_vol1-217   /acfsvol   acfs   defaults   0 0
+```
+
+## Step 6: Enable the NFS Server
+
+Install NFS utilities if they aren't already present:
+
+```bash
+sudo dnf install nfs-utils -y
+```
+
+Enable and start the NFS service:
+
+```bash
+sudo systemctl enable nfs-server
+sudo systemctl start nfs-server
+sudo systemctl status nfs-server
+```
+
+## Step 7: Export the ACFS Directory
+
+Edit `/etc/exports` and add:
+
+```
+/acfsvol    192.168.1.0/24(rw,sync,no_root_squash,no_subtree_check)
+```
+
+Replace `192.168.1.0/24` with the subnet or specific IP addresses of the client servers that should be allowed to mount this share.
+
+| Option | Meaning |
+|---|---|
+| `rw` | Read/write access |
+| `sync` | Writes are committed to disk before the server replies |
+| `no_root_squash` | Root on the client remains root on the server |
+| `no_subtree_check` | Skips subtree checking for improved reliability |
+
+Apply the export:
+
+```bash
+sudo exportfs -a
+sudo exportfs -v
+```
+
+## Step 8: Open the Firewall (If Needed)
+
+```bash
+sudo firewall-cmd --permanent --add-service=nfs
+sudo firewall-cmd --permanent --add-service=mountd
+sudo firewall-cmd --permanent --add-service=rpc-bind
+sudo firewall-cmd --reload
+```
+
+### Server-Side Verification
+
+```bash
+df -h
+```
+
+```
+Filesystem                               Size  Used Avail Use% Mounted on
+/dev/mapper/ol-root                       39G   31G  9.0G  78% /
+/dev/sda1                               1014M  663M  352M  66% /boot
+/dev/mapper/oraarch--vg01-oraarch--LV01   49G  3.8G   43G   9% /oraarch
+/dev/mapper/oradata--vg01-oradata--lv01   79G   42G   34G  56% /oradata
+/dev/mapper/oraapp--vg01-oraapp--lv01     71G   50G   19G  74% /oraapp
+/dev/mapper/oradata02_vg-oradata02_lv     20G  930M   18G   5% /oradata02
+192.168.10.95:/mnt/Shared                332G  156G  177G  47% /Shared
+/dev/asm/acfs_vol1-217                   4.9G   49M  4.8G   1% /acfsvol
+```
+
+## Step 9: Mount ACFS on the Client Server
+
+On the client, install NFS utilities if needed:
+
+```bash
+sudo dnf install nfs-utils -y
+```
+
+Create a mount point:
+
+```bash
+sudo mkdir -p /mnt/acfsvol
+```
+
+Mount the exported directory:
+
+```bash
+sudo mount -t nfs oraprd02:/acfsvol /mnt/acfsvol
+```
+
+Verify:
+
+```bash
+df -h | grep acfs
+```
+
+### Auto-Mount at Boot on the Client (Optional)
+
+Add to `/etc/fstab`:
+
+```
+oraprd02:/acfsvol   /mnt/acfsvol   nfs   defaults   0 0
+```
+
+## Important Considerations
+
+ACFS itself is cluster-aware, but once it's re-exported over NFS to external clients, that cluster awareness doesn't extend to the NFS clients. If multiple clients write to the share simultaneously, you are responsible for managing file locking carefully at the application layer — NFS locking semantics apply, not ACFS's native cluster locking.
+
+## Summary
+
+This gives you a working pattern for taking ASM-backed storage and making it available outside the cluster boundary:
+
+1. Carve out a dedicated ASM disk group and ACFS volume
+2. Mount it locally on the GI/database server
+3. Re-export the mount point via standard Linux NFS
+4. Mount it on any client that needs access
+
+It's a handy technique when you need shared storage between a database tier and an application or utility server without provisioning separate SAN/NFS infrastructure — though it's worth weighing the locking caveat above against your actual concurrency requirements before relying on this in production.

@@ -1,0 +1,321 @@
+---
+title: "Refreshing a Non-Production Oracle Database with a Sparse Clone on Exadata"
+description: "A step-by-step walkthrough of refreshing a non-production Oracle database from a Test Master source using dbms_dnfs.clonedb_renamefile on an OCI Exadata VM Cluster."
+publishedAt: "2026-07-23"
+tags: ["oracle", "exadata", "database-refresh", "sparse-clone", "data-guard", "asm", "dba"]
+category: "oci"
+draft: false
+---
+
+## Overview
+
+Refreshing a non-production database from a production-like source is a routine
+but risky operation. Copying every datafile in full is slow and storage-hungry,
+especially on Exadata where non-prod environments often share disk groups with
+other databases.
+
+A **sparse clone**, built with Oracle's `dbms_dnfs.clonedb_renamefile`
+procedure, solves this by creating space-efficient datafile copies that only
+consume storage for blocks that differ from the source. The result is a fully
+independent, writable database that opens in a fraction of the time a full
+restore would take.
+
+This post walks through the manual process I use to refresh a non-production
+database (`WORKDB`) from a "Test Master" source on an **OCI Exadata VM
+Cluster** running RAC, ASM, and Data Guard. All names below — database names,
+paths, disk groups — are placeholders. Swap in your own naming conventions
+before using this anywhere real.
+
+> This post covers the manual, step-by-step procedure only. A follow-up post
+> will cover automating this end-to-end with Jenkins and Ansible.
+
+## Why Sparse Clone Instead of a Full Restore?
+
+- **Speed** — no need to copy multi-terabyte datafiles block for block.
+- **Storage efficiency** — the clone only stores changed blocks; unchanged
+  blocks are read from the read-only source.
+- **Repeatability** — because the source ("Test Master") is rebuilt from
+  production and kept read-only, refreshes can be run repeatedly with a
+  predictable, scriptable process.
+
+The trade-off is that the source database must remain online and read-only
+for as long as any clone depends on it — so the Test Master itself needs its
+own lifecycle, which is why Step 1 below exists.
+
+## Placeholders Used in This Post
+
+| Placeholder | Meaning |
+|---|---|
+| `<PRIMARY_DB>` | Primary database name (Data Guard) |
+| `<STBY_DB>` | Standby database name (Data Guard) |
+| `<DB_NAME>` | Target (non-production) database being refreshed — e.g. `WORKDB` |
+| `<old_pdb_name>` | Current PDB name as cloned from Test Master |
+| `<new_pdb_name>` | Target PDB name after rename |
+| `<DATE>` | Date stamp for script/folder naming, e.g. `07232026` |
+
+Disk groups are shown generically as `DATA_DG` (regular datafile storage) and
+`SPARSE_DG` (the sparse clone target). Script paths are shown under a generic
+`/u01/scripts/db_refresh/<DATE>/` directory — adjust to match your own
+environment's conventions.
+
+## Prerequisites
+
+- A Test Master database exists and its Data Guard standby is confirmed **in
+  sync**.
+- ASM `SYSASM` access on the storage/grid infrastructure.
+- `SYSDBA` access on both the Test Master and the target database.
+- OS-level access to create directories and edit files under your scripts
+  directory.
+- `DATA_DG` and `SPARSE_DG` disk groups are online and accessible from the
+  target host.
+- A confirmed backup or export of anything needed from the existing target
+  database — the drop step later in this process is permanent.
+- An approved maintenance window, since the target database is unavailable
+  for the duration.
+
+## Step 1: Prepare the Test Master
+
+The Test Master is the read-only source every sparse clone is built from. It
+needs to be current and its datafiles need to be locked down before any clone
+can safely reference them.
+
+### 1.1 Rebuild the Test Master and Re-Establish Replication
+
+Drop the existing Test Master database and reconfigure Data Guard replication
+from `<PRIMARY_DB>`. **Wait until replication is confirmed in sync** before
+moving on — proceeding early risks building a clone from an incomplete
+source.
+
+### 1.2 Set Standby Apply Off
+
+```sql
+dgmgrl sys/pwd as sysdba
+show configuration;
+show database verbose <PRIMARY_DB>;
+show database verbose <STBY_DB>;
+edit database <STBY_DB> set state='APPLY-OFF';
+```
+
+### 1.3 Generate the Script to Set Test Master Datafiles Read-Only
+
+```sql
+SET newpage 0 linesize 999 pagesize 0 feedback off heading off echo off space 0
+SET tab off trimspool on
+SPOOL /u01/scripts/db_refresh/<DATE>/set_owner_data_dg_<DATE>.sql
+SELECT 'ALTER DISKGROUP DATA_DG SET PERMISSION OWNER=READ ONLY, GROUP=READ ONLY, OTHER=NONE FOR FILE '''||name||''';' FROM v$datafile;
+EXIT
+```
+
+```bash
+chmod 777 /u01/scripts/db_refresh/<DATE>/set_owner_data_dg_<DATE>.sql
+```
+
+### 1.4 Create the Master Control File
+
+```sql
+ALTER DATABASE BACKUP CONTROLFILE TO TRACE AS '/u01/scripts/db_refresh/<DATE>/testmaster_control_<DATE>.txt';
+```
+
+```bash
+cp /u01/scripts/db_refresh/<DATE>/testmaster_control_<DATE>.txt \
+   /u01/scripts/db_refresh/<DATE>/testmaster_control_<DATE>.sql
+```
+
+> **Note:** Convert the trace file into a runnable `.sql` script and add any
+> missing PDB (`pdb$seed`) datafile entries. Change only the database name in
+> the `CREATE CONTROLFILE` and redo log clauses — leave the datafile paths
+> untouched. Those get renamed by the sparse-clone rename script in the next
+> step.
+
+### 1.5 Create the Master Rename (Sparse Clone) Script
+
+```sql
+SET newpage 0
+SET linesize 999
+SET pagesize 0
+SET feedback off
+SET heading off
+SET echo off
+SET space 0
+SET tab off
+SET trimspool on
+SPOOL /u01/scripts/db_refresh/<DATE>/CLONEDB_rename_<DATE>.sql
+SELECT 'EXECUTE dbms_dnfs.clonedb_renamefile ('''||name||''','''||
+       REPLACE(REPLACE(REPLACE(name,'.','_'),'TESTMASTER','CLONEDB'),'+DATA_DG','+SPARSE_DG')||''');'
+FROM v$datafile;
+EXIT
+```
+
+This generates one `dbms_dnfs.clonedb_renamefile` call per datafile, mapping
+each Test Master path on `DATA_DG` to a sparse clone path on `SPARSE_DG`.
+
+### 1.6 Set Test Master Datafiles to Read-Only
+
+Run on the ASM instance as `SYSASM`:
+
+```sql
+ALTER DISKGROUP DATA_DG SET ATTRIBUTE 'ACCESS_CONTROL.ENABLED'='TRUE';
+@/u01/scripts/db_refresh/<DATE>/set_owner_data_dg_<DATE>.sql
+```
+
+At this point the Test Master is locked down and ready to serve as a clone
+source.
+
+## Step 2: Drop the Target Database
+
+This is the point of no return for the existing `<DB_NAME>` — confirm your
+backups and outage window before continuing.
+
+```bash
+. oraenv <DB_NAME>
+```
+
+```sql
+CREATE PFILE='/u01/scripts/db_refresh/<DATE>/init<DB_NAME>.ora' FROM SPFILE;
+```
+
+```sql
+ALTER SYSTEM SET cluster_database=FALSE SCOPE=SPFILE;
+```
+
+```bash
+srvctl stop database -d <DB_NAME>
+```
+
+```sql
+STARTUP MOUNT RESTRICT EXCLUSIVE;
+DROP DATABASE;
+```
+
+## Step 3: Refresh the Database
+
+### 3.1–3.3 Set Up the Working Directory and Adapt the Scripts
+
+```bash
+cd /u01/scripts/db_refresh/<DATE>
+mkdir <DB_NAME>
+cd <DB_NAME>
+```
+
+Copy the rename script and control file script from the Test Master
+directory into this new directory, then update all references to
+`<DB_NAME>`:
+
+```bash
+sed -i 's/CLONEDB/<DB_NAME>/g' CLONEDB_rename_<DATE>.sql
+sed -i 's/CLONEDB/<DB_NAME>/g' testmaster_control_<DATE>.sql
+```
+
+### 3.4 Copy and Edit the Parameter File
+
+Confirm/update the following parameters in `init<DB_NAME>.ora`:
+
+```
+*.db_files=4024
+*.max_string_size=extended
+*.control_files='+DATA_DG/<DB_NAME>/CONTROLFILE/<DB_NAME>_control.ctl'
+*.db_create_file_dest='+SPARSE_DG'
+*.db_create_online_log_dest_1='+DATA_DG'
+*.job_queue_processes=0
+```
+
+### 3.5–3.7 Start Nomount, Create the Control File, Run the Rename
+
+```sql
+STARTUP NOMOUNT PFILE='init<DB_NAME>.ora';
+@cr_control_<DB_NAME>_<DATE>.sql
+```
+
+```sql
+SPOOL sparse_<DB_NAME>_rename_<DATE>.log
+@<DB_NAME>_rename_<DATE>.sql
+SPOOL OFF
+```
+
+### 3.8 Verify the Datafiles — Do Not Skip This
+
+```sql
+SET LINES 300
+COL NAME FOR A200
+SET PAGES 30000
+SELECT name FROM v$datafile WHERE name LIKE '%DATA_DG%';
+SELECT name FROM v$datafile WHERE name LIKE '%TESTMASTER%';
+SELECT name FROM v$datafile WHERE name LIKE '%SPARSE%';
+SELECT COUNT(*) FROM v$datafile;
+```
+
+> **This is the step that matters most.** Every datafile must be renamed off
+> the Test Master path. If even one file is missed and the instance later
+> writes to it, you've written to your read-only source — and the whole
+> refresh needs to be redone from Step 1.
+
+### 3.9 Open with Resetlogs
+
+```sql
+ALTER DATABASE OPEN RESETLOGS;
+```
+
+### 3.10 Rename the PDB
+
+```sql
+ALTER PLUGGABLE DATABASE <old_pdb_name> CLOSE IMMEDIATE;
+ALTER PLUGGABLE DATABASE <old_pdb_name> OPEN RESTRICTED;
+ALTER SESSION SET CONTAINER = <old_pdb_name>;
+ALTER PLUGGABLE DATABASE RENAME GLOBAL_NAME TO <new_pdb_name>;
+ALTER PLUGGABLE DATABASE <new_pdb_name> CLOSE IMMEDIATE;
+ALTER PLUGGABLE DATABASE <new_pdb_name> OPEN;
+```
+
+### 3.11–3.13 Re-Enable RAC and Bring the Database Up Cluster-Wide
+
+```sql
+SHUTDOWN IMMEDIATE;
+```
+
+Edit the PFILE to set `*.cluster_database=TRUE`, then:
+
+```sql
+STARTUP PFILE='init<DB_NAME>.ora';
+CREATE SPFILE FROM PFILE='/u01/scripts/db_refresh/<DATE>/<DB_NAME>/init<DB_NAME>.ora';
+```
+
+Note the SPFILE location reported in the alert log, then register it:
+
+```bash
+srvctl modify database -d <DB_NAME> -spfile '+SPARSE_DG/spfile<DB_NAME>.ora'
+srvctl start database -d <DB_NAME>
+srvctl status database -d <DB_NAME>
+srvctl status service -d <DB_NAME>
+```
+
+### 3.14 Post-Refresh Tasks
+
+- Add the required temporary tablespace datafiles.
+- Run post-refresh application grant scripts.
+- Re-enable or reschedule application job scheduling.
+- Recompile invalid objects.
+
+## Validation Checklist
+
+| Check | Expected Result |
+|---|---|
+| Database open | `OPEN`, no `ORA-` errors in the alert log |
+| RAC status | All configured instances up |
+| Services | All required services started |
+| Datafile locations | All reference `SPARSE_DG` / `<DB_NAME>`, none reference the Test Master path |
+| PDB name | Renamed to `<new_pdb_name>` and open |
+| Temp tablespace | Tempfiles present and online |
+| Application connectivity | Confirmed by the application/service owner |
+| Invalid objects | Recompiled, count at expected baseline |
+
+## Closing Thoughts
+
+The manual process above is reliable but has a lot of surface area for
+human error — mistyped paths, a skipped verification step, forgetting to
+re-enable RAC. It's a good candidate for automation once you've run it
+enough times to trust the steps.
+
+In a follow-up post, I'll walk through wrapping this entire process in a
+Jenkins pipeline backed by Ansible, including how I handle the two riskiest
+checkpoints — the Data Guard sync gate and the datafile rename verification —
+as hard gates rather than steps that just log a warning and continue.
